@@ -21,8 +21,11 @@ OUT_DIR="$HOME/Desktop/Meeting Notes"
 mkdir -p "$SUPPORT" "$OUT_DIR"
 
 echo ">>> Installing audio tools + local AI runtime…"
-brew install ffmpeg switchaudio-osx blackhole-2ch ollama 2>/dev/null || true
-brew services start ollama 2>/dev/null || true
+brew install ffmpeg switchaudio-osx blackhole-2ch 2>/dev/null || true
+# Use the official prebuilt Ollama (the Homebrew *formula* ships without its
+# llama-server runner on 0.30.x and can't run models — the cask bundles it).
+brew install --cask ollama 2>/dev/null || true
+open -a Ollama 2>/dev/null || true; sleep 3
 sudo killall coreaudiod 2>/dev/null || true   # makes BlackHole appear
 
 echo ">>> Building the local AI environment…"
@@ -31,7 +34,7 @@ python3 -m venv "$SUPPORT/venv"
 "$SUPPORT/venv/bin/pip" install --quiet mlx-whisper openai
 
 echo ">>> Downloading models (one-time, a few GB)…"
-ollama pull qwen3.6:35b-mlx 2>/dev/null || ollama pull qwen2.5:7b 2>/dev/null || true
+ollama pull llama3.2:3b 2>/dev/null || ollama pull qwen2.5:7b 2>/dev/null || true
 ffmpeg -hide_banner -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono -t 1 "$SUPPORT/_warm.wav" -y 2>/dev/null || true
 "$SUPPORT/venv/bin/python3" -c "import mlx_whisper; mlx_whisper.transcribe('$SUPPORT/_warm.wav', path_or_hf_repo='mlx-community/whisper-large-v3-turbo')" 2>/dev/null || true
 rm -f "$SUPPORT/_warm.wav"
@@ -94,7 +97,7 @@ def main():
     p.add_argument("audio")
     p.add_argument("--out-dir", required=True)
     p.add_argument("--model", default="mlx-community/whisper-large-v3-turbo")
-    p.add_argument("--llm", default="qwen3.6:35b-mlx")
+    p.add_argument("--llm", default="llama3.2:3b")
     p.add_argument("--base-url", default="http://localhost:11434/v1")
     p.add_argument("--api-key", default="not-needed")
     args = p.parse_args()
@@ -148,8 +151,11 @@ cat > "$SUPPORT/config.sh" << CFG
 EMAIL="$EMAIL"
 CAPTURE_DEVICE="Meeting Capture"
 OUTPUT_DEVICE="Meeting Output"
-LLM="qwen3.6:35b-mlx"
+# --- LLM provider (any OpenAI-compatible server). Edit these to switch. ---
+# Ollama :11434/v1 | LM Studio :1234/v1 | oMLX :8005/v1 | llama.cpp :8080/v1 | OpenAI https://api.openai.com/v1
+LLM="llama3.2:3b"
 BASE_URL="http://localhost:11434/v1"
+API_KEY="not-needed"
 CFG
 
 echo ">>> Installing the 'meeting' command…"
@@ -163,7 +169,46 @@ SUPPORT="$HOME/Library/Application Support/MeetingNotes"
 OUT_DIR="$HOME/Desktop/Meeting Notes"
 [ -f "$SUPPORT/config.sh" ] && . "$SUPPORT/config.sh"
 : "${CAPTURE_DEVICE:=Meeting Capture}"; : "${OUTPUT_DEVICE:=Meeting Output}"
-: "${LLM:=qwen3.6:35b-mlx}"; : "${BASE_URL:=http://localhost:11434/v1}"
+: "${LLM:=llama3.2:3b}"; : "${BASE_URL:=http://localhost:11434/v1}"; : "${API_KEY:=not-needed}"
+
+# List models at whatever OpenAI-compatible endpoint is selected (works for any provider)
+list_models() {
+  "$SUPPORT/venv/bin/python3" - "$BASE_URL" "$API_KEY" 2>/dev/null << 'PY' || echo "  (could not reach $BASE_URL)"
+import sys
+from openai import OpenAI
+for m in OpenAI(base_url=sys.argv[1], api_key=sys.argv[2] or "x").models.list().data:
+    print("  -", m.id)
+PY
+}
+
+# --- pick model / provider / endpoint for this run (any OpenAI-compatible server) ---
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -m|--model)    LLM="$2"; shift 2 ;;
+    -u|--url)      BASE_URL="$2"; shift 2 ;;
+    -k|--key)      API_KEY="$2"; shift 2 ;;
+    -p|--provider)
+      case "$2" in
+        ollama)   BASE_URL="http://localhost:11434/v1" ;;
+        lmstudio) BASE_URL="http://localhost:1234/v1" ;;
+        omlx)     BASE_URL="http://localhost:8005/v1" ;;
+        llamacpp) BASE_URL="http://localhost:8080/v1" ;;
+        openai)   BASE_URL="https://api.openai.com/v1" ;;
+        *) echo "Unknown provider '$2' (use: ollama|lmstudio|omlx|llamacpp|openai)"; exit 1 ;;
+      esac; shift 2 ;;
+    -l|--list)     echo "Models at $BASE_URL:"; list_models; exit 0 ;;
+    -h|--help)
+      echo "Usage: meeting [options]"
+      echo "  -m, --model MODEL    model for this run (default: $LLM)"
+      echo "  -p, --provider NAME  ollama | lmstudio | omlx | llamacpp | openai"
+      echo "  -u, --url URL        any OpenAI-compatible endpoint ending in /v1"
+      echo "  -k, --key KEY        API key (for cloud providers)"
+      echo "  -l, --list           list models at the current endpoint"
+      exit 0 ;;
+    *) LLM="$1"; shift ;;
+  esac
+done
+echo "📋  Model: $LLM   @  $BASE_URL"
 
 mkdir -p "$OUT_DIR"
 STAMP=$(date +"%Y-%m-%d_%H-%M")
@@ -188,7 +233,7 @@ ffmpeg -hide_banner -loglevel error -f avfoundation -i ":$CAPTURE_DEVICE" -ac 1 
 echo ""
 echo "🧠  Transcribing & summarizing locally…"
 NOTE_FILE=$("$SUPPORT/venv/bin/python3" "$SUPPORT/notes_engine.py" "$AUDIO" \
-            --out-dir "$OUT_DIR" --llm "$LLM" --base-url "$BASE_URL")
+            --out-dir "$OUT_DIR" --llm "$LLM" --base-url "$BASE_URL" --api-key "$API_KEY")
 if [ -z "$NOTE_FILE" ]; then
   echo "❌  Couldn't generate notes — is your local model running?  Try:  ollama serve"
   exit 1
