@@ -34,7 +34,7 @@ python3 -m venv "$SUPPORT/venv"
 "$SUPPORT/venv/bin/pip" install --quiet mlx-whisper openai
 
 echo ">>> Downloading models (one-time, a few GB)…"
-ollama pull llama3.2:3b 2>/dev/null || ollama pull qwen2.5:7b 2>/dev/null || true
+ollama pull qwen3:4b-instruct 2>/dev/null || ollama pull qwen2.5:7b 2>/dev/null || true
 ffmpeg -hide_banner -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono -t 1 "$SUPPORT/_warm.wav" -y 2>/dev/null || true
 "$SUPPORT/venv/bin/python3" -c "import mlx_whisper; mlx_whisper.transcribe('$SUPPORT/_warm.wav', path_or_hf_repo='mlx-community/whisper-large-v3-turbo')" 2>/dev/null || true
 rm -f "$SUPPORT/_warm.wav"
@@ -97,7 +97,7 @@ def main():
     p.add_argument("audio")
     p.add_argument("--out-dir", required=True)
     p.add_argument("--model", default="mlx-community/whisper-large-v3-turbo")
-    p.add_argument("--llm", default="llama3.2:3b")
+    p.add_argument("--llm", default="qwen3:4b-instruct")
     p.add_argument("--base-url", default="http://localhost:11434/v1")
     p.add_argument("--api-key", default="not-needed")
     args = p.parse_args()
@@ -153,7 +153,7 @@ CAPTURE_DEVICE="Meeting Capture"
 OUTPUT_DEVICE="Meeting Output"
 # --- LLM provider (any OpenAI-compatible server). Edit these to switch. ---
 # Ollama :11434/v1 | LM Studio :1234/v1 | oMLX :8005/v1 | llama.cpp :8080/v1 | OpenAI https://api.openai.com/v1
-LLM="llama3.2:3b"
+LLM="qwen3:4b-instruct"
 BASE_URL="http://localhost:11434/v1"
 API_KEY="not-needed"
 CFG
@@ -169,7 +169,7 @@ SUPPORT="$HOME/Library/Application Support/MeetingNotes"
 OUT_DIR="$HOME/Desktop/Meeting Notes"
 [ -f "$SUPPORT/config.sh" ] && . "$SUPPORT/config.sh"
 : "${CAPTURE_DEVICE:=Meeting Capture}"; : "${OUTPUT_DEVICE:=Meeting Output}"
-: "${LLM:=llama3.2:3b}"; : "${BASE_URL:=http://localhost:11434/v1}"; : "${API_KEY:=not-needed}"
+: "${LLM:=qwen3:4b-instruct}"; : "${BASE_URL:=http://localhost:11434/v1}"; : "${API_KEY:=not-needed}"
 
 # List models at whatever OpenAI-compatible endpoint is selected (works for any provider)
 list_models() {

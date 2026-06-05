@@ -93,7 +93,7 @@ def main():
     p.add_argument("audio", help="Path to the recording (.m4a, .mp3, .wav, .mp4 ...)")
     p.add_argument("--model", default="mlx-community/whisper-large-v3-turbo",
                    help="Whisper MLX model repo (default: large-v3-turbo)")
-    p.add_argument("--llm", default="qwen36",
+    p.add_argument("--llm", default="qwen3:4b-instruct",
                    help="Local LLM name exactly as your server reports it")
     p.add_argument("--base-url", default="http://localhost:8005/v1",
                    help="OpenAI-compatible endpoint. LM Studio :1234 | Ollama :11434 | oMLX :8005")

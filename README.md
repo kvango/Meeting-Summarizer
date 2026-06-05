@@ -162,7 +162,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:11434/v1", api_key="not-needed")
 
 resp = client.chat.completions.create(
-    model="llama3.2:3b",
+    model="qwen3:4b-instruct",
     messages=[
         {"role": "system", "content": "Summarize into TL;DR, Decisions, Action Items. Don't invent."},
         {"role": "user", "content": transcript},
@@ -231,7 +231,7 @@ source ~/.bashrc     # if using bash
 ### Model downloads failed
 
 ```bash
-ollama pull llama3.2:3b
+ollama pull qwen3:4b-instruct
 ollama pull qwen2.5:7b
 ```
 
