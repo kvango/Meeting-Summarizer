@@ -44,14 +44,14 @@ def _local_whisper_dir() -> Path:
     return Path.home() / "Library" / "Application Support" / "MeetingNotes" / "models" / "whisper-large-v3-turbo"
 
 
-def resolve_whisper_source(model_arg: str) -> str:
+def resolve_whisper_source(model_arg: str | None) -> str:
     """Prefer an explicit --model, then a local manually-downloaded copy, then the HF repo id."""
-    if model_arg and model_arg != "mlx-community/whisper-large-v3-turbo":
+    if model_arg:
         return model_arg
     local = _local_whisper_dir()
     if local.is_dir() and any(local.iterdir()):
         return str(local)
-    return model_arg
+    return "mlx-community/whisper-large-v3-turbo"
 
 
 def transcribe(audio_path: Path, whisper_repo: str):
@@ -118,8 +118,8 @@ def summarize(transcript: str, llm_model: str, base_url: str, api_key: str):
 def main():
     p = argparse.ArgumentParser(description="Local meeting-notes generator for Apple Silicon.")
     p.add_argument("audio", help="Path to the recording (.m4a, .mp3, .wav, .mp4 ...)")
-    p.add_argument("--model", default="mlx-community/whisper-large-v3-turbo",
-                   help="Whisper MLX model repo (default: large-v3-turbo)")
+    p.add_argument("--model", default=None,
+                   help="Whisper MLX model repo or local folder (default: local copy if present, else large-v3-turbo)")
     p.add_argument("--llm", default="gemma4:e4b",
                    help="Local LLM name exactly as your server reports it")
     p.add_argument("--base-url", default="http://localhost:8005/v1",
@@ -133,8 +133,9 @@ def main():
         sys.exit(f"File not found: {audio_path}")
 
     # 1) Transcribe on the GPU
-    print(f"Transcribing {audio_path.name} with {args.model} ...")
-    result, t_transcribe = transcribe(audio_path, args.model)
+    whisper_source = resolve_whisper_source(args.model)
+    print(f"Transcribing {audio_path.name} with {whisper_source} ...")
+    result, t_transcribe = transcribe(audio_path, whisper_source)
     transcript = collapse_repeats(result["text"].strip())
     segments = result.get("segments", [])
     audio_dur = segments[-1]["end"] if segments else 0.0

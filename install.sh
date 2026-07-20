@@ -131,7 +131,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("audio")
     p.add_argument("--out-dir", required=True)
-    p.add_argument("--model", default="mlx-community/whisper-large-v3-turbo")
+    p.add_argument("--model", default=None, help="Whisper model repo or local folder (default: local copy if present, else download)")
     p.add_argument("--llm", default="gemma4:e4b")
     p.add_argument("--base-url", default="http://localhost:11434/v1")
     p.add_argument("--api-key", default="not-needed")
