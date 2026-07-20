@@ -232,10 +232,20 @@ source ~/.bashrc     # if using bash
 
 ```bash
 ollama pull gemma4:e4b
-ollama pull gemma4:e4b
 ```
 
 Then run `meeting` again.
+
+### Whisper model download fails with an SSL/certificate error
+
+Common on corporate networks with a TLS-inspecting proxy. Rather than fighting Python's certificate store, download the model manually once via browser and drop it in place — the tool automatically prefers a local copy over Hugging Face:
+
+1. Open **https://huggingface.co/mlx-community/whisper-large-v3-turbo/tree/main** (or, on Windows/Linux, search Hugging Face for a CTranslate2-format `faster-whisper-large-v3` build) and download every file listed.
+2. Place the files directly inside:
+   - macOS: `~/Library/Application Support/MeetingNotes/models/whisper-large-v3-turbo/`
+   - Windows: `%LOCALAPPDATA%\MeetingNotes\models\faster-whisper-large-v3-turbo\`
+   - Linux: `~/.local/share/meeting-notes/models/faster-whisper-large-v3-turbo/`
+3. Run `meeting` again — no network needed from here on for transcription.
 
 ---
 

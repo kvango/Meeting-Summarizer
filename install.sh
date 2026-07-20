@@ -35,9 +35,29 @@ python3 -m venv "$SUPPORT/venv"
 
 echo ">>> Downloading models (one-time, a few GB)…"
 ollama pull gemma4:e4b 2>/dev/null || true
-ffmpeg -hide_banner -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono -t 1 "$SUPPORT/_warm.wav" -y 2>/dev/null || true
-"$SUPPORT/venv/bin/python3" -c "import mlx_whisper; mlx_whisper.transcribe('$SUPPORT/_warm.wav', path_or_hf_repo='mlx-community/whisper-large-v3-turbo')" 2>/dev/null || true
-rm -f "$SUPPORT/_warm.wav"
+
+WHISPER_MODEL_DIR="$SUPPORT/models/whisper-large-v3-turbo"
+if [ -d "$WHISPER_MODEL_DIR" ] && [ -n "$(ls -A "$WHISPER_MODEL_DIR" 2>/dev/null)" ]; then
+  echo "    Found a local Whisper model at $WHISPER_MODEL_DIR — skipping download."
+else
+  ffmpeg -hide_banner -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono -t 1 "$SUPPORT/_warm.wav" -y 2>/dev/null || true
+  if "$SUPPORT/venv/bin/python3" -c "import mlx_whisper; mlx_whisper.transcribe('$SUPPORT/_warm.wav', path_or_hf_repo='mlx-community/whisper-large-v3-turbo')" 2>/tmp/meeting-notes-whisper-warm.log; then
+    echo "    Whisper model downloaded and cached."
+  else
+    echo ""
+    echo "    ⚠️  Couldn't download the Whisper model automatically."
+    echo "        This is usually a corporate SSL/proxy issue, not a real problem with the tool."
+    echo "        Fix (no network required after this):"
+    echo "          1. In a browser, open:"
+    echo "             https://huggingface.co/mlx-community/whisper-large-v3-turbo/tree/main"
+    echo "          2. Download every file listed there."
+    echo "          3. Put them directly inside:"
+    echo "             $WHISPER_MODEL_DIR"
+    echo "        'meeting' will automatically use that folder instead of downloading — see log:"
+    echo "        /tmp/meeting-notes-whisper-warm.log"
+  fi
+  rm -f "$SUPPORT/_warm.wav"
+fi
 
 echo ">>> Installing the note engine…"
 cat > "$SUPPORT/notes_engine.py" << 'PYEOF'
@@ -51,6 +71,21 @@ from pathlib import Path
 
 def log(msg):  # progress -> stderr
     print(msg, file=sys.stderr, flush=True)
+
+
+def _local_whisper_dir():
+    """Where a manually-downloaded model lives, if you placed one there."""
+    return Path.home() / "Library" / "Application Support" / "MeetingNotes" / "models" / "whisper-large-v3-turbo"
+
+
+def resolve_whisper_source(model_arg):
+    """Prefer an explicit --model, then a local manually-downloaded copy, then the HF repo id."""
+    if model_arg:
+        return model_arg
+    local = _local_whisper_dir()
+    if local.is_dir() and any(local.iterdir()):
+        return str(local)
+    return "mlx-community/whisper-large-v3-turbo"
 
 
 def fmt(s):
@@ -107,10 +142,22 @@ def main():
         log(f"Audio not found: {audio}"); sys.exit(1)
 
     import mlx_whisper
-    log("Transcribing on the GPU...")
+    source = resolve_whisper_source(args.model)
+    log(f"Transcribing on the GPU ({source})...")
     t0 = time.perf_counter()
-    result = mlx_whisper.transcribe(str(audio), path_or_hf_repo=args.model,
-                                    condition_on_previous_text=False)
+    try:
+        result = mlx_whisper.transcribe(str(audio), path_or_hf_repo=source,
+                                        condition_on_previous_text=False)
+    except Exception as e:
+        if "CERTIFICATE" in str(e).upper() or "SSL" in str(e).upper():
+            local = _local_whisper_dir()
+            log("Could not download the Whisper model (SSL/certificate error — common on corporate networks).")
+            log("Fix: download the files from")
+            log("  https://huggingface.co/mlx-community/whisper-large-v3-turbo/tree/main")
+            log(f"and place them directly in: {local}")
+            log("No network will be needed once they're there.")
+            sys.exit(1)
+        raise
     t_tx = time.perf_counter() - t0
     transcript = collapse_repeats(result["text"].strip())
     if not transcript:

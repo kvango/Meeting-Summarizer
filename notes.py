@@ -39,12 +39,39 @@ def fmt(seconds: float) -> str:
     return f"{s}s"
 
 
+def _local_whisper_dir() -> Path:
+    """Where a manually-downloaded model lives, if you placed one there."""
+    return Path.home() / "Library" / "Application Support" / "MeetingNotes" / "models" / "whisper-large-v3-turbo"
+
+
+def resolve_whisper_source(model_arg: str) -> str:
+    """Prefer an explicit --model, then a local manually-downloaded copy, then the HF repo id."""
+    if model_arg and model_arg != "mlx-community/whisper-large-v3-turbo":
+        return model_arg
+    local = _local_whisper_dir()
+    if local.is_dir() and any(local.iterdir()):
+        return str(local)
+    return model_arg
+
+
 def transcribe(audio_path: Path, whisper_repo: str):
     """Run Whisper on the Apple Silicon GPU via MLX. Returns (result, seconds)."""
     import mlx_whisper  # imported lazily so --help works without the dep
 
+    source = resolve_whisper_source(whisper_repo)
     t0 = time.perf_counter()
-    result = mlx_whisper.transcribe(str(audio_path), path_or_hf_repo=whisper_repo, condition_on_previous_text=False)
+    try:
+        result = mlx_whisper.transcribe(str(audio_path), path_or_hf_repo=source, condition_on_previous_text=False)
+    except Exception as e:
+        if "CERTIFICATE" in str(e).upper() or "SSL" in str(e).upper():
+            sys.exit(
+                "Could not download the Whisper model (SSL/certificate error — common on corporate networks).\n"
+                "Fix: download the files from\n"
+                "  https://huggingface.co/mlx-community/whisper-large-v3-turbo/tree/main\n"
+                f"and place them directly in: {_local_whisper_dir()}\n"
+                "No network will be needed once they're there."
+            )
+        raise
     return result, time.perf_counter() - t0
 
 

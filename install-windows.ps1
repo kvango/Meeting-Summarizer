@@ -39,12 +39,26 @@ Transcription backend is chosen automatically:
   - macOS on Apple Silicon  -> mlx-whisper (Metal GPU)
   - Windows / Linux         -> faster-whisper (NVIDIA GPU if present, else CPU)
 Summarization is identical everywhere: a local Ollama / OpenAI-compatible server."""
-import argparse, platform, sys, time
+import argparse, os, platform, sys, time
 from pathlib import Path
 
 
 def log(msg):
     print(msg, file=sys.stderr, flush=True)
+
+
+def _support_dir():
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "MeetingNotes"
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "MeetingNotes"
+    return Path.home() / ".local" / "share" / "meeting-notes"
+
+
+def _local_model_dir(backend):
+    """Where a manually-downloaded model lives, if you placed one there."""
+    sub = "whisper-large-v3-turbo" if backend == "mlx" else "faster-whisper-large-v3-turbo"
+    return _support_dir() / "models" / sub
 
 
 def fmt(s):
@@ -73,15 +87,38 @@ def pick_backend(forced):
     return "faster"
 
 
+def _model_not_found_help(backend):
+    local = _local_model_dir(backend)
+    log("Could not download the Whisper model (SSL/network error — common on corporate networks).")
+    log(f"Fix: download a matching model and place its files directly in: {local}")
+    if backend == "mlx":
+        log("  Source: https://huggingface.co/mlx-community/whisper-large-v3-turbo/tree/main")
+    else:
+        log("  Source: search 'faster-whisper large-v3-turbo' on Hugging Face")
+        log("  (e.g. Systran/faster-whisper-large-v3) — CTranslate2 format required.")
+    log("No network will be needed once the files are there.")
+
+
 def transcribe(audio_path, backend, model):
     """Returns (text, seconds, audio_duration_seconds)."""
     t0 = time.perf_counter()
+    local_dir = _local_model_dir(backend)
     if backend == "mlx":
         import mlx_whisper
-        repo = model or "mlx-community/whisper-large-v3-turbo"
+        if model:
+            repo = model
+        elif local_dir.is_dir() and any(local_dir.iterdir()):
+            repo = str(local_dir)
+        else:
+            repo = "mlx-community/whisper-large-v3-turbo"
         log(f"Transcribing on the Apple GPU ({repo})...")
-        r = mlx_whisper.transcribe(str(audio_path), path_or_hf_repo=repo,
-                                   condition_on_previous_text=False)
+        try:
+            r = mlx_whisper.transcribe(str(audio_path), path_or_hf_repo=repo,
+                                       condition_on_previous_text=False)
+        except Exception as e:
+            if "CERTIFICATE" in str(e).upper() or "SSL" in str(e).upper():
+                _model_not_found_help(backend); sys.exit(1)
+            raise
         text = r["text"].strip()
         segs = r.get("segments", [])
         dur = segs[-1]["end"] if segs else 0.0
@@ -94,10 +131,20 @@ def transcribe(audio_path, backend, model):
             cuda = False
         device = "cuda" if cuda else "cpu"
         compute = "float16" if cuda else "int8"
-        name = model or "large-v3-turbo"
+        if model:
+            name = model
+        elif local_dir.is_dir() and any(local_dir.iterdir()):
+            name = str(local_dir)
+        else:
+            name = "large-v3-turbo"
         log(f"Transcribing with faster-whisper ({name}, {device})...")
-        wm = WhisperModel(name, device=device, compute_type=compute)
-        segments, info = wm.transcribe(str(audio_path), condition_on_previous_text=False)
+        try:
+            wm = WhisperModel(name, device=device, compute_type=compute)
+            segments, info = wm.transcribe(str(audio_path), condition_on_previous_text=False)
+        except Exception as e:
+            if "CERTIFICATE" in str(e).upper() or "SSL" in str(e).upper():
+                _model_not_found_help(backend); sys.exit(1)
+            raise
         text = " ".join(seg.text.strip() for seg in segments).strip()
         dur = getattr(info, "duration", 0.0) or 0.0
     return collapse_repeats(text), time.perf_counter() - t0, dur
