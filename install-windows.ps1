@@ -26,7 +26,7 @@ py -3 -m venv "$Support\venv"
 # 3) Pull the summary model (one-time)
 Write-Host ">>> Downloading the summary model (one-time)..."
 Start-Process -NoNewWindow ollama -ArgumentList "serve"; Start-Sleep 2
-ollama pull qwen3:4b-instruct 2>$null; if ($LASTEXITCODE -ne 0) { ollama pull qwen2.5:7b 2>$null }
+ollama pull gemma4:e4b 2>$null
 
 # 4) Write the engine
 Write-Host ">>> Installing the note engine..."
@@ -144,7 +144,7 @@ def main():
     p.add_argument("--backend", choices=["mlx", "faster"], default=None,
                    help="Force a transcription backend (default: auto by OS)")
     p.add_argument("--model", default=None, help="Whisper model (default per backend)")
-    p.add_argument("--llm", default="qwen3:4b-instruct")
+    p.add_argument("--llm", default="gemma4:e4b")
     p.add_argument("--base-url", default="http://localhost:11434/v1")
     p.add_argument("--api-key", default="not-needed")
     args = p.parse_args()
@@ -189,7 +189,7 @@ $MicDevice = Read-Host "Paste your MICROPHONE device name (from the list above)"
 @"
 # LLM provider (any OpenAI-compatible server). Edit to switch:
 # Ollama :11434/v1 | LM Studio :1234/v1 | oMLX :8005/v1 | llama.cpp :8080/v1 | OpenAI https://api.openai.com/v1
-`$Llm = "qwen3:4b-instruct"
+`$Llm = "gemma4:e4b"
 `$BaseUrl = "http://localhost:11434/v1"
 `$ApiKey = "not-needed"
 `$SysDevice = "$SysDevice"

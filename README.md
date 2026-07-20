@@ -52,20 +52,20 @@ For a full one-hour meeting, you're looking at transcription in under 60 seconds
 ### macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Shreetej/files2/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kvango/Meeting-Summarizer/main/install.sh | bash
 ```
 
 ### Windows
 
 ```powershell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-curl -fsSL https://raw.githubusercontent.com/Shreetej/files2/main/install-windows.ps1 | powershell
+curl -fsSL https://raw.githubusercontent.com/kvango/Meeting-Summarizer/main/install-windows.ps1 | powershell
 ```
 
 ### Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Shreetej/files2/main/install-linux.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kvango/Meeting-Summarizer/main/install-linux.sh | bash
 ```
 
 #### What the installer does:
@@ -99,7 +99,7 @@ A minute later, your notes are ready in `Desktop/Meeting Notes` and in your inbo
 ### Use a different AI model for a single call:
 
 ```bash
-meeting qwen3:4b-instruct
+meeting gemma4:e4b
 ```
 
 ### Switch AI providers:
@@ -162,7 +162,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:11434/v1", api_key="not-needed")
 
 resp = client.chat.completions.create(
-    model="qwen3:4b-instruct",
+    model="gemma4:e4b",
     messages=[
         {"role": "system", "content": "Summarize into TL;DR, Decisions, Action Items. Don't invent."},
         {"role": "user", "content": transcript},
@@ -231,8 +231,8 @@ source ~/.bashrc     # if using bash
 ### Model downloads failed
 
 ```bash
-ollama pull qwen3:4b-instruct
-ollama pull qwen2.5:7b
+ollama pull gemma4:e4b
+ollama pull gemma4:e4b
 ```
 
 Then run `meeting` again.
@@ -277,9 +277,9 @@ This tool relies on two open-source models:
    - Runs locally via MLX on Apple Silicon
    - ~78× faster than real time for transcription
 
-2. **Llama 3.2 3B** (Meta) — text summarization
-   - ~2 GB, optimized for summaries
-   - Can swap for any larger model (Qwen, Llama 8B, etc.)
+2. **Gemma 4 e4b** (Google) — text summarization
+   - Optimized for summaries
+   - Can swap for any other Ollama/LM Studio-compatible model
 
 Both run via **Ollama**, a local AI runtime that requires no cloud connection.
 
@@ -303,7 +303,7 @@ Fork, break, improve. The only person who needs to approve your changes is you.
 A: Yes. Your Mac plays the call through its speakers and hears it through its mic. This tool captures that audio at the OS level, so it works with any meeting app.
 
 **Q: What if I want to use a bigger model for fancier summaries?**  
-A: Run `meeting qwen3:35b-mlx` or swap the default in the config. Same one-word command.
+A: Run `meeting gemma4:e4b` or swap the default in the config. Same one-word command.
 
 **Q: Can I run this on multiple Macs?**  
 A: Install on each one independently. Each machine handles its own notes.
@@ -346,7 +346,7 @@ Open source. See LICENSE file for details.
 ## Thanks
 
 - OpenAI (Whisper)
-- Meta (Llama)
+- Google (Gemma)
 - The MLX team (Apple Silicon acceleration)
 - Ollama (easy local AI runtime)
 

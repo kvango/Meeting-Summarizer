@@ -36,7 +36,7 @@ python3 -m venv "$SUPPORT/venv"
 
 # 4) Pull the summary model (one-time)
 echo ">>> Downloading the summary model (one-time)…"
-ollama pull qwen3:4b-instruct 2>/dev/null || ollama pull qwen2.5:7b 2>/dev/null || true
+ollama pull gemma4:e4b 2>/dev/null || true
 
 # 5) Write the engine
 echo ">>> Installing the note engine…"
@@ -154,7 +154,7 @@ def main():
     p.add_argument("--backend", choices=["mlx", "faster"], default=None,
                    help="Force a transcription backend (default: auto by OS)")
     p.add_argument("--model", default=None, help="Whisper model (default per backend)")
-    p.add_argument("--llm", default="qwen3:4b-instruct")
+    p.add_argument("--llm", default="gemma4:e4b")
     p.add_argument("--base-url", default="http://localhost:11434/v1")
     p.add_argument("--api-key", default="not-needed")
     args = p.parse_args()
@@ -190,7 +190,7 @@ PYEOF
 cat > "$SUPPORT/config.sh" << CFG
 # --- LLM provider (any OpenAI-compatible server). Edit these to switch. ---
 # Ollama :11434/v1 | LM Studio :1234/v1 | oMLX :8005/v1 | llama.cpp :8080/v1 | OpenAI https://api.openai.com/v1
-LLM="qwen3:4b-instruct"
+LLM="gemma4:e4b"
 BASE_URL="http://localhost:11434/v1"
 API_KEY="not-needed"
 CFG
@@ -203,7 +203,7 @@ cat > "$BIN/meeting" << 'MEETEOF'
 SUPPORT="$HOME/.local/share/meeting-notes"
 OUT_DIR="$HOME/Desktop/Meeting Notes"; [ -d "$HOME/Desktop" ] || OUT_DIR="$HOME/Meeting Notes"
 [ -f "$SUPPORT/config.sh" ] && . "$SUPPORT/config.sh"
-: "${LLM:=qwen3:4b-instruct}"; : "${BASE_URL:=http://localhost:11434/v1}"; : "${API_KEY:=not-needed}"
+: "${LLM:=gemma4:e4b}"; : "${BASE_URL:=http://localhost:11434/v1}"; : "${API_KEY:=not-needed}"
 
 # List models at whatever OpenAI-compatible endpoint is selected (works for any provider)
 list_models() {

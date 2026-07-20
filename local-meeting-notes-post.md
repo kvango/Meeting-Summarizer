@@ -36,7 +36,7 @@ Let's build it.
 Three parts, all local:
 
 1. **Whisper (large-v3-turbo) via MLX** — Apple's framework runs the speech-to-text model directly on your GPU's unified memory. On Apple Silicon, MLX-based Whisper transcribes far faster than real time.
-2. **Your existing local LLM** — the same Qwen 3.6 server you set up in my last post (LM Studio, Ollama, or oMLX). It turns the raw transcript into structured notes. If you haven't set that up yet, install [LM Studio](https://lmstudio.ai), load Qwen 3.6, and start its local server — that's the whole prerequisite.
+2. **Your existing local LLM** — the same Gemma 4 server you set up in my last post (LM Studio, Ollama, or oMLX). It turns the raw transcript into structured notes. If you haven't set that up yet, install [LM Studio](https://lmstudio.ai), load Gemma 4, and start its local server — that's the whole prerequisite.
 3. **~150 lines of Python** that glue them together and print a benchmark scoreboard so you can see exactly how fast (and how free) it is.
 
 ---
@@ -148,7 +148,7 @@ def main():
     p = argparse.ArgumentParser(description="Local meeting-notes generator for Apple Silicon.")
     p.add_argument("audio", help="Path to the recording (.m4a, .mp3, .wav, .mp4 ...)")
     p.add_argument("--model", default="mlx-community/whisper-large-v3-turbo")
-    p.add_argument("--llm", default="qwen3.6:35b-mlx", help="Local LLM name as your server reports it")
+    p.add_argument("--llm", default="gemma4:e4b", help="Local LLM name as your server reports it")
     p.add_argument("--base-url", default="http://localhost:1234/v1",
                    help="LM Studio :1234 | Ollama :11434 | oMLX :8000")
     p.add_argument("--api-key", default="not-needed")
@@ -207,7 +207,7 @@ python notes.py meeting.m4a
 If your server is Ollama instead of LM Studio, point at it:
 
 ```bash
-python notes.py meeting.m4a --llm qwen3.6:35b-mlx --base-url http://localhost:11434/v1
+python notes.py meeting.m4a --llm gemma4:e4b --base-url http://localhost:11434/v1
 ```
 
 You'll see something like this in the terminal:
