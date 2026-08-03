@@ -22,19 +22,74 @@ mkdir -p "$SUPPORT" "$OUT_DIR"
 
 echo ">>> Installing audio tools + local AI runtime…"
 brew install ffmpeg switchaudio-osx blackhole-2ch 2>/dev/null || true
-# Use the official prebuilt Ollama (the Homebrew *formula* ships without its
-# llama-server runner on 0.30.x and can't run models — the cask bundles it).
-brew install --cask ollama 2>/dev/null || true
-open -a Ollama 2>/dev/null || true; sleep 3
+# llama.cpp — a small, fast local inference engine. Its `llama-server` binary
+# speaks the same OpenAI-compatible /v1 API Ollama did, so notes_engine.py
+# doesn't need to know the difference. Homebrew builds it with Metal support
+# on Apple Silicon automatically.
+if command -v llama-server >/dev/null 2>&1; then
+  echo "    llama.cpp already installed — skipping."
+else
+  brew install llama.cpp 2>/dev/null || true
+fi
 sudo killall coreaudiod 2>/dev/null || true   # makes BlackHole appear
+
+LLAMA_SERVER_BIN="$(brew --prefix)/bin/llama-server"
+MODEL_REPO="unsloth/gemma-4-E4B-it-GGUF"
+MODEL_QUANT="Q8_0"
+MODEL_ALIAS="gemma4:e4b"
+
+echo ">>> Checking the llama.cpp background service…"
+mkdir -p "$HOME/Library/LaunchAgents"
+PLIST="$HOME/Library/LaunchAgents/com.meetingnotes.llamaserver.plist"
+NEW_PLIST=$(cat << PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.meetingnotes.llamaserver</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$LLAMA_SERVER_BIN</string>
+    <string>-hf</string><string>$MODEL_REPO:$MODEL_QUANT</string>
+    <string>--alias</string><string>$MODEL_ALIAS</string>
+    <string>--port</string><string>8080</string>
+    <string>-c</string><string>8192</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$SUPPORT/llama-server.log</string>
+  <key>StandardErrorPath</key><string>$SUPPORT/llama-server.log</string>
+</dict>
+</plist>
+PLIST_EOF
+)
+
+if [ -f "$PLIST" ] && [ "$(cat "$PLIST")" = "$NEW_PLIST" ] \
+   && curl -fsS http://localhost:8080/v1/models >/dev/null 2>&1; then
+  echo "    Already registered and running — leaving it alone."
+else
+  echo "$NEW_PLIST" > "$PLIST"
+  launchctl unload "$PLIST" 2>/dev/null || true
+  launchctl load "$PLIST"
+fi
 
 echo ">>> Building the local AI environment…"
 python3 -m venv "$SUPPORT/venv"
 "$SUPPORT/venv/bin/pip" install --quiet --upgrade pip
 "$SUPPORT/venv/bin/pip" install --quiet mlx-whisper openai
 
-echo ">>> Downloading models (one-time, a few GB)…"
-ollama pull gemma4:e4b 2>/dev/null || true
+echo ">>> Making sure the LLM is downloaded and the server is ready…"
+for i in $(seq 1 180); do
+  if curl -fsS http://localhost:8080/v1/models >/dev/null 2>&1; then
+    echo "    Model ready."
+    break
+  fi
+  sleep 5
+done
+if ! curl -fsS http://localhost:8080/v1/models >/dev/null 2>&1; then
+  echo "    ⚠️  Still downloading/starting — it'll finish in the background."
+  echo "        Check progress: tail -f \"$SUPPORT/llama-server.log\""
+fi
 
 WHISPER_MODEL_DIR="$SUPPORT/models/whisper-large-v3-turbo"
 if [ -d "$WHISPER_MODEL_DIR" ] && [ -n "$(ls -A "$WHISPER_MODEL_DIR" 2>/dev/null)" ]; then
@@ -133,7 +188,7 @@ def main():
     p.add_argument("--out-dir", required=True)
     p.add_argument("--model", default=None, help="Whisper model repo or local folder (default: local copy if present, else download)")
     p.add_argument("--llm", default="gemma4:e4b")
-    p.add_argument("--base-url", default="http://localhost:11434/v1")
+    p.add_argument("--base-url", default="http://localhost:8080/v1")
     p.add_argument("--api-key", default="not-needed")
     args = p.parse_args()
 
@@ -199,9 +254,9 @@ EMAIL="$EMAIL"
 CAPTURE_DEVICE="Meeting Capture"
 OUTPUT_DEVICE="Meeting Output"
 # --- LLM provider (any OpenAI-compatible server). Edit these to switch. ---
-# Ollama :11434/v1 | LM Studio :1234/v1 | oMLX :8005/v1 | llama.cpp :8080/v1 | OpenAI https://api.openai.com/v1
+# llama.cpp :8080/v1 (default) | Ollama :11434/v1 | LM Studio :1234/v1 | oMLX :8005/v1 | OpenAI https://api.openai.com/v1
 LLM="gemma4:e4b"
-BASE_URL="http://localhost:11434/v1"
+BASE_URL="http://localhost:8080/v1"
 API_KEY="not-needed"
 CFG
 
@@ -216,7 +271,24 @@ SUPPORT="$HOME/Library/Application Support/MeetingNotes"
 OUT_DIR="$HOME/Desktop/Meeting Notes"
 [ -f "$SUPPORT/config.sh" ] && . "$SUPPORT/config.sh"
 : "${CAPTURE_DEVICE:=Meeting Capture}"; : "${OUTPUT_DEVICE:=Meeting Output}"
-: "${LLM:=gemma4:e4b}"; : "${BASE_URL:=http://localhost:11434/v1}"; : "${API_KEY:=not-needed}"
+: "${LLM:=gemma4:e4b}"; : "${BASE_URL:=http://localhost:8080/v1}"; : "${API_KEY:=not-needed}"
+
+# Start the local llama.cpp service if it's not already answering (e.g. after a
+# reboot before login-item startup, or if it was quit manually).
+ensure_llm_running() {
+  case "$BASE_URL" in
+    http://localhost:8080/v1*)
+      curl -fsS "$BASE_URL/models" >/dev/null 2>&1 && return
+      echo "🧠  Starting llama.cpp…"
+      launchctl kickstart -k "gui/$(id -u)/com.meetingnotes.llamaserver" >/dev/null 2>&1 || true
+      for i in $(seq 1 60); do
+        curl -fsS "$BASE_URL/models" >/dev/null 2>&1 && return
+        sleep 2
+      done
+      echo "⚠️  llama.cpp didn't come up in time — check: tail -f \"$SUPPORT/llama-server.log\""
+      ;;
+  esac
+}
 
 # List models at whatever OpenAI-compatible endpoint is selected (works for any provider)
 list_models() {
@@ -236,18 +308,18 @@ while [ $# -gt 0 ]; do
     -k|--key)      API_KEY="$2"; shift 2 ;;
     -p|--provider)
       case "$2" in
+        llamacpp) BASE_URL="http://localhost:8080/v1" ;;
         ollama)   BASE_URL="http://localhost:11434/v1" ;;
         lmstudio) BASE_URL="http://localhost:1234/v1" ;;
         omlx)     BASE_URL="http://localhost:8005/v1" ;;
-        llamacpp) BASE_URL="http://localhost:8080/v1" ;;
         openai)   BASE_URL="https://api.openai.com/v1" ;;
-        *) echo "Unknown provider '$2' (use: ollama|lmstudio|omlx|llamacpp|openai)"; exit 1 ;;
+        *) echo "Unknown provider '$2' (use: llamacpp|ollama|lmstudio|omlx|openai)"; exit 1 ;;
       esac; shift 2 ;;
     -l|--list)     echo "Models at $BASE_URL:"; list_models; exit 0 ;;
     -h|--help)
       echo "Usage: meeting [options]"
       echo "  -m, --model MODEL    model for this run (default: $LLM)"
-      echo "  -p, --provider NAME  ollama | lmstudio | omlx | llamacpp | openai"
+      echo "  -p, --provider NAME  llamacpp | ollama | lmstudio | omlx | openai"
       echo "  -u, --url URL        any OpenAI-compatible endpoint ending in /v1"
       echo "  -k, --key KEY        API key (for cloud providers)"
       echo "  -l, --list           list models at the current endpoint"
@@ -273,6 +345,8 @@ ORIG_OUT=$(SwitchAudioSource -c -t output)
 trap 'SwitchAudioSource -t output -s "$ORIG_OUT" >/dev/null 2>&1' EXIT
 SwitchAudioSource -t output -s "$OUTPUT_DEVICE" >/dev/null 2>&1
 
+ensure_llm_running
+
 echo "🔴  Recording — join your meeting now."
 echo "    Press  q  to stop when it ends."
 ffmpeg -hide_banner -loglevel error -f avfoundation -i ":$CAPTURE_DEVICE" -ac 1 -ar 16000 "$AUDIO"
@@ -282,7 +356,9 @@ echo "🧠  Transcribing & summarizing locally…"
 NOTE_FILE=$("$SUPPORT/venv/bin/python3" "$SUPPORT/notes_engine.py" "$AUDIO" \
             --out-dir "$OUT_DIR" --llm "$LLM" --base-url "$BASE_URL" --api-key "$API_KEY")
 if [ -z "$NOTE_FILE" ]; then
-  echo "❌  Couldn't generate notes — is your local model running?  Try:  ollama serve"
+  echo "❌  Couldn't generate notes — is the local model server running?"
+  echo "    Check:  tail -f \"$SUPPORT/llama-server.log\""
+  echo "    Restart: launchctl kickstart -k \"gui/\$(id -u)/com.meetingnotes.llamaserver\""
   exit 1
 fi
 
