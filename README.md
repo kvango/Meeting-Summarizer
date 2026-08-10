@@ -41,7 +41,7 @@ On a MacBook Pro M5 Max:
 
 - **Transcription**: A 9-minute meeting → text in **7 seconds** (78× faster than real time, via GPU)
 - **Summarization**: Clean notes in **3–5 seconds** depending on your model choice
-- **One-time setup**: ~2–3 minutes and 2 GB download
+- **One-time setup**: ~2–3 minutes and 2–3 GB download
 
 For a full one-hour meeting, you're looking at transcription in under 60 seconds, then another few seconds for notes. By the time you close your laptop, you're done.
 
@@ -68,17 +68,18 @@ curl -fsSL https://raw.githubusercontent.com/kvango/Meeting-Summarizer/main/inst
 curl -fsSL https://raw.githubusercontent.com/kvango/Meeting-Summarizer/main/install-linux.sh | bash
 ```
 
-#### What the installer does:
+#### What the installer does (macOS):
 
-1. Checks for Homebrew (macOS/Linux) or Poetry (Windows) — prompts to install if missing
-2. Installs `ffmpeg`, audio routing tools, and **Ollama** (the local AI runtime)
-3. Sets up a Python virtual environment with `mlx-whisper` and the OpenAI client
-4. Downloads the speech model (~800 MB) and default LLM (~2 GB)
-5. Creates folders for notes and a support directory
-6. Asks for your email (for automatic note delivery)
-7. Walks you through a two-click audio setup (macOS asks for microphone permission)
+1. Checks for Homebrew — prompts to install if missing
+2. Installs `ffmpeg`, audio routing tools, and **llama.cpp** (a lightweight local inference engine — skipped if already installed)
+3. Registers `llama-server` as a background service (via `launchd`) so it's always running, the same way the old Ollama app was — skipped/left alone if it's already registered and healthy
+4. Sets up a Python virtual environment with `mlx-whisper` and the OpenAI client
+5. Downloads the speech model (~800 MB) and the default LLM GGUF (~4 GB for Gemma 4 E4B at `Q8_0`)
+6. Creates folders for notes and a support directory
+7. Asks for your email (for automatic note delivery)
+8. Walks you through a two-click audio setup (macOS asks for microphone permission)
 
-**The first run takes a few minutes.** After that, everything is cached locally.
+**The first run takes a few minutes.** After that, everything is cached locally, and re-running the installer (e.g. after a `git pull`) won't redownload or restart anything that's already in place.
 
 ---
 
@@ -88,7 +89,7 @@ curl -fsSL https://raw.githubusercontent.com/kvango/Meeting-Summarizer/main/inst
 meeting
 ```
 
-That's it. Recording starts. Talk normally. When the call ends, press **q**. 
+That's it. Recording starts. Talk normally. When the call ends, press **q**.
 
 A minute later, your notes are ready in `Desktop/Meeting Notes` and in your inbox.
 
@@ -105,9 +106,21 @@ meeting gemma4:e4b
 ### Switch AI providers:
 
 ```bash
-meeting -p lmstudio          # Use LM Studio instead of Ollama
-meeting -u http://localhost:8000/v1  # Point at any OpenAI-compatible endpoint
+meeting -p ollama                     # Use Ollama instead of llama.cpp
+meeting -u http://localhost:1234/v1   # Point at any OpenAI-compatible endpoint
 ```
+
+Supported `-p/--provider` values: `llamacpp` (default) | `ollama` | `lmstudio` | `omlx` | `openai`
+
+### Reprocess an existing recording:
+
+Skip recording entirely and re-run transcription + summarization on any `.m4a`/`.mp3`/`.wav` you already have — a failed run, a call recorded elsewhere, or anything you want to summarize with a different model:
+
+```bash
+meeting -f "~/Library/Application Support/MeetingNotes/rec_2026-08-10_12-59.m4a"
+```
+
+If a run ever fails partway through, the recording is **never deleted** — the error message tells you the exact `meeting -f ...` command to retry it.
 
 ### List available models:
 
@@ -120,6 +133,17 @@ meeting --list
 ```bash
 meeting --help
 ```
+
+---
+
+## Advanced Configuration
+
+Two different config files control two different things — worth knowing the difference:
+
+- **`~/Library/Application Support/MeetingNotes/config.sh`** — per-run settings read every time you type `meeting`: `LLM`, `BASE_URL`, `API_KEY`. Edit this to change your default model or endpoint.
+- **Near the top of `install.sh`** — one-time settings baked into the `llama-server` background service when it's (re)installed: `MODEL_REPO`, `MODEL_QUANT`, and `MODEL_CTX`.
+  - `MODEL_QUANT` controls how compressed the model weights are (size/speed/quality trade-off) — it has nothing to do with how much text you can send the model.
+  - `MODEL_CTX` is the context window — the max combined tokens (prompt + transcript + response) the server will accept in one request. Long meetings can exceed this; if you see an `exceeds the available context size` error, raise `MODEL_CTX` (Gemma 4 E4B supports up to 131072) and re-run `install.sh` — it'll detect the change and restart the service automatically.
 
 ---
 
@@ -154,12 +178,12 @@ transcript = result["text"]
 
 ### Step 3: Summarize (With a Local LLM)
 
-The same OpenAI client everyone uses for ChatGPT — just pointed at `localhost`:
+The same OpenAI client everyone uses for ChatGPT — just pointed at `localhost`, at a **llama.cpp** server instead of a cloud API:
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:11434/v1", api_key="not-needed")
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="not-needed")
 
 resp = client.chat.completions.create(
     model="gemma4:e4b",
@@ -171,7 +195,7 @@ resp = client.chat.completions.create(
 notes = resp.choices[0].message.content
 ```
 
-The model runs on your machine. No internet. No API key. No bill.
+`llama-server` (from llama.cpp) exposes the same OpenAI-compatible `/v1` API as Ollama, LM Studio, and every other local runtime — so this code doesn't change no matter which one you point it at. The model runs on your machine. No internet. No API key. No bill.
 
 ### Step 4: Save and Email
 
@@ -226,15 +250,33 @@ source ~/.bashrc     # if using bash
 
 1. Check the `Desktop/Meeting Notes` folder — the file should be there
 2. Make sure you've given Mail permission to send (macOS will prompt on first run)
-3. Verify your email in the settings (check `~/Library/Application Support/MeetingNotes/config.json`)
+3. Verify your email in the settings (check `~/Library/Application Support/MeetingNotes/config.sh`)
 
-### Model downloads failed
+### "Couldn't generate notes — is the local model server running?"
+
+`llama-server` isn't answering. Check the logs and, if needed, restart it:
 
 ```bash
-ollama pull gemma4:e4b
+tail -f "$HOME/Library/Application Support/MeetingNotes/llama-server.log"
+launchctl kickstart -k "gui/$(id -u)/com.meetingnotes.llamaserver"
 ```
 
-Then run `meeting` again.
+Your recording is never deleted on failure — retry with `meeting -f "<path to the .m4a>"` once the server's back up.
+
+### "exceeds the available context size" error
+
+Your transcript + prompt is longer than the server's configured context window. Raise `MODEL_CTX` near the top of `install.sh` (default `32768`; Gemma 4 E4B supports up to `131072`) and re-run `install.sh` — it detects the change and restarts the service with the new setting automatically. Then retry with `meeting -f "<path to the .m4a>"`.
+
+### Model download failed
+
+The default model is fetched automatically by `llama-server` on first launch. If it stalls or fails:
+
+```bash
+tail -f "$HOME/Library/Application Support/MeetingNotes/llama-server.log"
+launchctl kickstart -k "gui/$(id -u)/com.meetingnotes.llamaserver"
+```
+
+Then run `meeting` again once `llama-server.log` shows it's ready.
 
 ### Whisper model download fails with an SSL/certificate error
 
@@ -252,8 +294,8 @@ Common on corporate networks with a TLS-inspecting proxy. Rather than fighting P
 ## Project Structure
 
 ```
-files2/
-├── install.sh              # macOS installer
+Meeting-Summarizer/
+├── install.sh              # macOS installer (llama.cpp-based)
 ├── install-windows.ps1     # Windows installer
 ├── install-linux.sh        # Linux installer
 ├── notes.py                # Core transcription + summarization logic
@@ -263,7 +305,7 @@ files2/
 After installation, files are stored in:
 
 ```
-~/Library/Application Support/MeetingNotes/    # Config, venv, models
+~/Library/Application Support/MeetingNotes/    # Config, venv, models, llama-server.log
 ~/Desktop/Meeting Notes/                        # Your notes (one file per meeting)
 ```
 
@@ -271,10 +313,10 @@ After installation, files are stored in:
 
 ## Requirements
 
-- **macOS 11+** (Apple Silicon or Intel with Ollama)
+- **macOS 11+, Apple Silicon** (Whisper transcription runs on the GPU via MLX, which is Apple Silicon-only; llama.cpp itself also runs on Intel Macs)
 - **Windows 10+** (with Python 3.9+)
 - **Linux** (Ubuntu 20.04+ recommended, with PipeWire or PulseAudio)
-- **~3 GB free disk space** (for models)
+- **~5 GB free disk space** (for models)
 - **Internet** (one-time for downloads; offline after that)
 
 ---
@@ -287,11 +329,11 @@ This tool relies on two open-source models:
    - Runs locally via MLX on Apple Silicon
    - ~78× faster than real time for transcription
 
-2. **Gemma 4 e4b** (Google) — text summarization
-   - Optimized for summaries
-   - Can swap for any other Ollama/LM Studio-compatible model
+2. **Gemma 4 E4B** (Google) — text summarization
+   - Run as a `.gguf` via llama.cpp, quantized to `Q8_0` by default
+   - Can swap for any other llama.cpp/Ollama/LM Studio-compatible model
 
-Both run via **Ollama**, a local AI runtime that requires no cloud connection.
+Both run via **llama.cpp**, a lightweight local inference engine that requires no cloud connection. `llama-server` runs as a background `launchd` service and exposes an OpenAI-compatible API, so it's a drop-in replacement for Ollama or any other local runtime.
 
 ---
 
@@ -309,22 +351,22 @@ Fork, break, improve. The only person who needs to approve your changes is you.
 
 ## FAQ
 
-**Q: Does this work with Zoom, Teams, Google Meet, FaceTime?**  
+**Q: Does this work with Zoom, Teams, Google Meet, FaceTime?**
 A: Yes. Your Mac plays the call through its speakers and hears it through its mic. This tool captures that audio at the OS level, so it works with any meeting app.
 
-**Q: What if I want to use a bigger model for fancier summaries?**  
-A: Run `meeting gemma4:e4b` or swap the default in the config. Same one-word command.
+**Q: What if I want to use a bigger model for fancier summaries?**
+A: Run `meeting <model-name>` or swap the default in `config.sh`. Same one-word command.
 
-**Q: Can I run this on multiple Macs?**  
+**Q: Can I run this on multiple Macs?**
 A: Install on each one independently. Each machine handles its own notes.
 
-**Q: What happens to notes if I close the app mid-call?**  
-A: Press **q** to stop recording cleanly. If you force-quit, the audio file is saved but won't be transcribed until you run the tool again.
+**Q: What happens to notes if I close the app mid-call?**
+A: Press **q** to stop recording cleanly. If you force-quit, the audio file is saved but won't be transcribed until you run `meeting -f "<path to the .m4a>"`.
 
-**Q: Can I share notes with my team?**  
+**Q: Can I share notes with my team?**
 A: Your notes are Markdown files in `Desktop/Meeting Notes`. Email them, paste them, commit them — they're yours.
 
-**Q: Is this HIPAA or SOC 2 compliant?**  
+**Q: Is this HIPAA or SOC 2 compliant?**
 A: This tool runs entirely on your machine, so compliance depends on your broader setup. Audio never touches a third-party server, so that piece is inherently private.
 
 ---
@@ -358,7 +400,7 @@ Open source. See LICENSE file for details.
 - OpenAI (Whisper)
 - Google (Gemma)
 - The MLX team (Apple Silicon acceleration)
-- Ollama (easy local AI runtime)
+- llama.cpp (lightweight local inference engine)
 
 ---
 

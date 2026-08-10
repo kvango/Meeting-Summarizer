@@ -37,6 +37,11 @@ LLAMA_SERVER_BIN="$(brew --prefix)/bin/llama-server"
 MODEL_REPO="unsloth/gemma-4-E4B-it-GGUF"
 MODEL_QUANT="Q8_0"
 MODEL_ALIAS="gemma4:e4b"
+# Gemma 4 E4B supports up to 128K tokens. 32K comfortably covers a multi-hour
+# meeting transcript + prompt overhead without eating excessive RAM for the
+# KV cache. Raise this (up to 131072) if you hit context errors on very long
+# recordings and have RAM to spare — each doubling roughly doubles KV-cache RAM.
+MODEL_CTX="32768"
 
 echo ">>> Checking the llama.cpp background service…"
 mkdir -p "$HOME/Library/LaunchAgents"
@@ -53,7 +58,7 @@ NEW_PLIST=$(cat << PLIST_EOF
     <string>-hf</string><string>$MODEL_REPO:$MODEL_QUANT</string>
     <string>--alias</string><string>$MODEL_ALIAS</string>
     <string>--port</string><string>8080</string>
-    <string>-c</string><string>8192</string>
+    <string>-c</string><string>$MODEL_CTX</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -301,6 +306,7 @@ PY
 }
 
 # --- pick model / provider / endpoint for this run (any OpenAI-compatible server) ---
+INPUT_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -m|--model)    LLM="$2"; shift 2 ;;
@@ -315,6 +321,7 @@ while [ $# -gt 0 ]; do
         openai)   BASE_URL="https://api.openai.com/v1" ;;
         *) echo "Unknown provider '$2' (use: llamacpp|ollama|lmstudio|omlx|openai)"; exit 1 ;;
       esac; shift 2 ;;
+    -f|--file)     INPUT_FILE="$2"; shift 2 ;;
     -l|--list)     echo "Models at $BASE_URL:"; list_models; exit 0 ;;
     -h|--help)
       echo "Usage: meeting [options]"
@@ -322,6 +329,7 @@ while [ $# -gt 0 ]; do
       echo "  -p, --provider NAME  llamacpp | ollama | lmstudio | omlx | openai"
       echo "  -u, --url URL        any OpenAI-compatible endpoint ending in /v1"
       echo "  -k, --key KEY        API key (for cloud providers)"
+      echo "  -f, --file PATH      reprocess an existing recording instead of recording a new one"
       echo "  -l, --list           list models at the current endpoint"
       exit 0 ;;
     *) LLM="$1"; shift ;;
@@ -331,25 +339,37 @@ echo "📋  Model: $LLM   @  $BASE_URL"
 
 mkdir -p "$OUT_DIR"
 STAMP=$(date +"%Y-%m-%d_%H-%M")
-AUDIO="$SUPPORT/rec_$STAMP.m4a"
 
-if ! SwitchAudioSource -a -t input 2>/dev/null | grep -q "$CAPTURE_DEVICE"; then
-  echo "⚠️  Audio device \"$CAPTURE_DEVICE\" not found."
-  echo "    Open Audio MIDI Setup and create an Aggregate Device"
-  echo "    (Microphone + BlackHole 2ch) named exactly: $CAPTURE_DEVICE"
-  exit 1
+if [ -n "$INPUT_FILE" ]; then
+  AUDIO="$(cd "$(dirname "$INPUT_FILE")" 2>/dev/null && pwd)/$(basename "$INPUT_FILE")"
+  if [ -z "$AUDIO" ] || [ ! -f "$AUDIO" ]; then
+    echo "❌  File not found: $INPUT_FILE"
+    exit 1
+  fi
+  echo "📄  Reprocessing existing recording: $AUDIO"
+else
+  AUDIO="$SUPPORT/rec_$STAMP.m4a"
+
+  if ! SwitchAudioSource -a -t input 2>/dev/null | grep -q "$CAPTURE_DEVICE"; then
+    echo "⚠️  Audio device \"$CAPTURE_DEVICE\" not found."
+    echo "    Open Audio MIDI Setup and create an Aggregate Device"
+    echo "    (Microphone + BlackHole 2ch) named exactly: $CAPTURE_DEVICE"
+    exit 1
+  fi
+
+  # Route what you hear into BlackHole so the call is captured; always restore on exit
+  ORIG_OUT=$(SwitchAudioSource -c -t output)
+  trap 'SwitchAudioSource -t output -s "$ORIG_OUT" >/dev/null 2>&1' EXIT
+  SwitchAudioSource -t output -s "$OUTPUT_DEVICE" >/dev/null 2>&1
 fi
-
-# Route what you hear into BlackHole so the call is captured; always restore on exit
-ORIG_OUT=$(SwitchAudioSource -c -t output)
-trap 'SwitchAudioSource -t output -s "$ORIG_OUT" >/dev/null 2>&1' EXIT
-SwitchAudioSource -t output -s "$OUTPUT_DEVICE" >/dev/null 2>&1
 
 ensure_llm_running
 
-echo "🔴  Recording — join your meeting now."
-echo "    Press  q  to stop when it ends."
-ffmpeg -hide_banner -loglevel error -f avfoundation -i ":$CAPTURE_DEVICE" -ac 1 -ar 16000 "$AUDIO"
+if [ -z "$INPUT_FILE" ]; then
+  echo "🔴  Recording — join your meeting now."
+  echo "    Press  q  to stop when it ends."
+  ffmpeg -hide_banner -loglevel error -f avfoundation -i ":$CAPTURE_DEVICE" -ac 1 -ar 16000 "$AUDIO"
+fi
 
 echo ""
 echo "🧠  Transcribing & summarizing locally…"
@@ -359,6 +379,8 @@ if [ -z "$NOTE_FILE" ]; then
   echo "❌  Couldn't generate notes — is the local model server running?"
   echo "    Check:  tail -f \"$SUPPORT/llama-server.log\""
   echo "    Restart: launchctl kickstart -k \"gui/\$(id -u)/com.meetingnotes.llamaserver\""
+  echo "    Your recording was NOT deleted — retry anytime with:"
+  echo "      meeting -f \"$AUDIO\""
   exit 1
 fi
 
@@ -380,7 +402,9 @@ APPLESCRIPT
   echo "📧  Emailed to $EMAIL"
 fi
 
-rm -f "$AUDIO"
+if [ -z "$INPUT_FILE" ]; then
+  rm -f "$AUDIO"
+fi
 echo "✅  Saved to:  $OUT_DIR"
 open "$OUT_DIR"
 MEETEOF
