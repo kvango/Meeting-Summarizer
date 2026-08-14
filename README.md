@@ -1,6 +1,6 @@
 # Meeting Notes — Free, Forever, Local, and Private
 
-Turn any meeting into clean, actionable notes in seconds. **100% on your Mac.** No subscriptions. No bots. No privacy trade-offs. Just one word: `meeting`.
+Turn any meeting into clean, actionable notes in seconds. **100% on your Mac.** No subscriptions. No bots. No privacy trade-offs. Just one word: `meeting`.  Please Note the original Branch contained Microsoft and Linux support - This branch is only being updated to support Mac at this time.  Windows and Linux users should see the original repot at https://github.com/Shreetej/Meeting-Summarizer
 
 ---
 
