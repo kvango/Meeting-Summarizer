@@ -186,27 +186,38 @@ Anything left unresolved.
 
 Be faithful to the transcript. Do NOT invent names, numbers, dates, or commitments. Keep it tight."""
 
+# Used only when the transcript carries "You:" / "Them:" speaker tags (dual mic/system capture).
+SYSTEM_PROMPT_LABELED = """You are an expert meeting-notes assistant. Given a raw, possibly messy \
+meeting transcript, produce clean Markdown notes with exactly these sections:
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("audio")
-    p.add_argument("--out-dir", required=True)
-    p.add_argument("--model", default=None, help="Whisper model repo or local folder (default: local copy if present, else download)")
-    p.add_argument("--llm", default="gemma4:e4b")
-    p.add_argument("--base-url", default="http://localhost:8080/v1")
-    p.add_argument("--api-key", default="not-needed")
-    args = p.parse_args()
+## TL;DR
+One or two sentences with the single most important outcome.
 
-    audio = Path(args.audio).expanduser()
-    if not audio.exists():
-        log(f"Audio not found: {audio}"); sys.exit(1)
+## Key Points
+Main topics, as concise bullets.
 
+## Decisions
+Concrete decisions made. If none, write "None recorded."
+
+## Action Items
+A checklist. Each line: - [ ] <task> - <owner> (<due date if mentioned>)
+Each line of the transcript is tagged with who said it: "You" is the note-taker (this user), \
+"Them" is whoever else was on the call. When a speaker commits to a task and no other name is \
+stated, assign it to "You" or "Them" based on the tag on that line. If a specific name is \
+mentioned in the dialogue (e.g. "Priya" saying she'll do something), prefer that name over the tag.
+
+## Open Questions
+Anything left unresolved.
+
+Be faithful to the transcript. Do NOT invent names, numbers, dates, or commitments. Keep it tight."""
+
+
+def transcribe_file(audio_path, whisper_source):
+    """Run Whisper on one audio file. Returns (segments, elapsed_seconds)."""
     import mlx_whisper
-    source = resolve_whisper_source(args.model)
-    log(f"Transcribing on the GPU ({source})...")
     t0 = time.perf_counter()
     try:
-        result = mlx_whisper.transcribe(str(audio), path_or_hf_repo=source,
+        result = mlx_whisper.transcribe(str(audio_path), path_or_hf_repo=whisper_source,
                                         condition_on_previous_text=False)
     except Exception as e:
         if "CERTIFICATE" in str(e).upper() or "SSL" in str(e).upper():
@@ -218,10 +229,69 @@ def main():
             log("No network will be needed once they're there.")
             sys.exit(1)
         raise
-    t_tx = time.perf_counter() - t0
-    transcript = collapse_repeats(result["text"].strip())
-    if not transcript:
-        transcript = "(No speech detected in the recording.)"
+    return result.get("segments", []), time.perf_counter() - t0
+
+
+def merge_labeled_transcript(mic_segments, sys_segments):
+    """Interleave two speaker-tagged segment lists by start time into one readable transcript.
+    Ties (equal start time) are broken deterministically: You before Them."""
+    tagged = [(seg["start"], 0, "You", seg["text"].strip()) for seg in mic_segments if seg["text"].strip()]
+    tagged += [(seg["start"], 1, "Them", seg["text"].strip()) for seg in sys_segments if seg["text"].strip()]
+    tagged.sort(key=lambda t: (t[0], t[1]))
+    lines = []
+    for start, _, speaker, text in tagged:
+        m, s = divmod(int(start), 60)
+        lines.append(f"[{m:02d}:{s:02d}] {speaker}: {collapse_repeats(text)}")
+    return "\n".join(lines)
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("audio", nargs="?", help="Single combined audio file (legacy/no speaker labels)")
+    p.add_argument("--mic", help="Mic-only audio file (your voice)")
+    p.add_argument("--system", help="System/loopback-only audio file (the far side)")
+    p.add_argument("--out-dir", required=True)
+    p.add_argument("--model", default=None, help="Whisper model repo or local folder (default: local copy if present, else download)")
+    p.add_argument("--llm", default="gemma4:e4b")
+    p.add_argument("--base-url", default="http://localhost:8080/v1")
+    p.add_argument("--api-key", default="not-needed")
+    args = p.parse_args()
+
+    dual_mode = bool(args.mic and args.system)
+    if not dual_mode and not args.audio:
+        log("Provide either a single audio file, or --mic and --system.")
+        sys.exit(1)
+
+    source = resolve_whisper_source(args.model)
+
+    if dual_mode:
+        mic_path = Path(args.mic).expanduser()
+        sys_path = Path(args.system).expanduser()
+        for pth in (mic_path, sys_path):
+            if not pth.exists():
+                log(f"Audio not found: {pth}"); sys.exit(1)
+
+        log(f"Transcribing your mic on the GPU ({source})...")
+        mic_segments, t_mic = transcribe_file(mic_path, source)
+        log(f"Transcribing the far side on the GPU ({source})...")
+        sys_segments, t_sys = transcribe_file(sys_path, source)
+        t_tx = t_mic + t_sys
+
+        transcript = merge_labeled_transcript(mic_segments, sys_segments)
+        if not transcript:
+            transcript = "(No speech detected in the recording.)"
+        system_prompt = SYSTEM_PROMPT_LABELED
+    else:
+        audio = Path(args.audio).expanduser()
+        if not audio.exists():
+            log(f"Audio not found: {audio}"); sys.exit(1)
+
+        log(f"Transcribing on the GPU ({source})...")
+        segments, t_tx = transcribe_file(audio, source)
+        transcript = collapse_repeats(" ".join(seg["text"].strip() for seg in segments).strip())
+        if not transcript:
+            transcript = "(No speech detected in the recording.)"
+        system_prompt = SYSTEM_PROMPT
 
     from openai import OpenAI
     log("Summarizing with the local model...")
@@ -229,7 +299,7 @@ def main():
     t0 = time.perf_counter()
     resp = client.chat.completions.create(
         model=args.llm, temperature=0.2,
-        messages=[{"role": "system", "content": SYSTEM_PROMPT},
+        messages=[{"role": "system", "content": system_prompt},
                   {"role": "user", "content": f"Here is the meeting transcript:\n\n{transcript}"}],
     )
     t_sum = time.perf_counter() - t0
@@ -256,7 +326,9 @@ EMAIL=$(osascript -e 'text returned of (display dialog "Email a copy of every me
 
 cat > "$SUPPORT/config.sh" << CFG
 EMAIL="$EMAIL"
-CAPTURE_DEVICE="Meeting Capture"
+MIC_DEVICE="Microphone"
+MIC_FALLBACK_DEVICE="MacBook Pro Microphone"
+SYSTEM_DEVICE="BlackHole 2ch"
 OUTPUT_DEVICE="Meeting Output"
 # --- LLM provider (any OpenAI-compatible server). Edit these to switch. ---
 # llama.cpp :8080/v1 (default) | Ollama :11434/v1 | LM Studio :1234/v1 | oMLX :8005/v1 | OpenAI https://api.openai.com/v1
@@ -275,7 +347,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 SUPPORT="$HOME/Library/Application Support/MeetingNotes"
 OUT_DIR="$HOME/Desktop/Meeting Notes"
 [ -f "$SUPPORT/config.sh" ] && . "$SUPPORT/config.sh"
-: "${CAPTURE_DEVICE:=Meeting Capture}"; : "${OUTPUT_DEVICE:=Meeting Output}"
+: "${MIC_DEVICE:=Microphone}"; : "${MIC_FALLBACK_DEVICE:=MacBook Pro Microphone}"; : "${SYSTEM_DEVICE:=BlackHole 2ch}"; : "${OUTPUT_DEVICE:=Meeting Output}"
 : "${LLM:=gemma4:e4b}"; : "${BASE_URL:=http://localhost:8080/v1}"; : "${API_KEY:=not-needed}"
 
 # Start the local llama.cpp service if it's not already answering (e.g. after a
@@ -348,12 +420,25 @@ if [ -n "$INPUT_FILE" ]; then
   fi
   echo "📄  Reprocessing existing recording: $AUDIO"
 else
-  AUDIO="$SUPPORT/rec_$STAMP.m4a"
+  MIC_AUDIO="$SUPPORT/rec_${STAMP}_mic.wav"
+  SYS_AUDIO="$SUPPORT/rec_${STAMP}_system.wav"
 
-  if ! SwitchAudioSource -a -t input 2>/dev/null | grep -q "$CAPTURE_DEVICE"; then
-    echo "⚠️  Audio device \"$CAPTURE_DEVICE\" not found."
-    echo "    Open Audio MIDI Setup and create an Aggregate Device"
-    echo "    (Microphone + BlackHole 2ch) named exactly: $CAPTURE_DEVICE"
+  if ! SwitchAudioSource -a -t input 2>/dev/null | grep -q "$MIC_DEVICE"; then
+    if [ -n "$MIC_FALLBACK_DEVICE" ] && SwitchAudioSource -a -t input 2>/dev/null | grep -q "$MIC_FALLBACK_DEVICE"; then
+      echo "ℹ️  \"$MIC_DEVICE\" not connected — using \"$MIC_FALLBACK_DEVICE\" instead."
+      MIC_DEVICE="$MIC_FALLBACK_DEVICE"
+    else
+      echo "⚠️  Audio device \"$MIC_DEVICE\" not found (fallback \"$MIC_FALLBACK_DEVICE\" not found either)."
+      echo "    Check your input device names with:"
+      echo "      ffmpeg -f avfoundation -list_devices true -i \"\""
+      echo "    then set MIC_DEVICE / MIC_FALLBACK_DEVICE in \"$SUPPORT/config.sh\" to match."
+      exit 1
+    fi
+  fi
+  if ! SwitchAudioSource -a -t input 2>/dev/null | grep -q "$SYSTEM_DEVICE"; then
+    echo "⚠️  Audio device \"$SYSTEM_DEVICE\" not found."
+    echo "    Install BlackHole (https://github.com/ExistentialAudio/BlackHole) if you haven't,"
+    echo "    or set SYSTEM_DEVICE in \"$SUPPORT/config.sh\" to match its name."
     exit 1
   fi
 
@@ -368,19 +453,33 @@ ensure_llm_running
 if [ -z "$INPUT_FILE" ]; then
   echo "🔴  Recording — join your meeting now."
   echo "    Press  q  to stop when it ends."
-  ffmpeg -hide_banner -loglevel error -f avfoundation -i ":$CAPTURE_DEVICE" -ac 1 -ar 16000 "$AUDIO"
+  # One ffmpeg process, two independent AVFoundation inputs, so both streams
+  # share the same clock and stay in sync. No Aggregate Device needed.
+  ffmpeg -hide_banner -loglevel error \
+    -thread_queue_size 1024 -f avfoundation -i ":$MIC_DEVICE" \
+    -thread_queue_size 1024 -f avfoundation -i ":$SYSTEM_DEVICE" \
+    -map 0:a:0 -ac 1 -ar 16000 -c:a pcm_s16le "$MIC_AUDIO" \
+    -map 1:a:0 -ac 1 -ar 16000 -c:a pcm_s16le "$SYS_AUDIO"
 fi
 
 echo ""
 echo "🧠  Transcribing & summarizing locally…"
-NOTE_FILE=$("$SUPPORT/venv/bin/python3" "$SUPPORT/notes_engine.py" "$AUDIO" \
-            --out-dir "$OUT_DIR" --llm "$LLM" --base-url "$BASE_URL" --api-key "$API_KEY")
+if [ -n "$INPUT_FILE" ]; then
+  NOTE_FILE=$("$SUPPORT/venv/bin/python3" "$SUPPORT/notes_engine.py" "$INPUT_FILE" \
+              --out-dir "$OUT_DIR" --llm "$LLM" --base-url "$BASE_URL" --api-key "$API_KEY")
+else
+  NOTE_FILE=$("$SUPPORT/venv/bin/python3" "$SUPPORT/notes_engine.py" \
+              --mic "$MIC_AUDIO" --system "$SYS_AUDIO" \
+              --out-dir "$OUT_DIR" --llm "$LLM" --base-url "$BASE_URL" --api-key "$API_KEY")
+fi
 if [ -z "$NOTE_FILE" ]; then
   echo "❌  Couldn't generate notes — is the local model server running?"
   echo "    Check:  tail -f \"$SUPPORT/llama-server.log\""
   echo "    Restart: launchctl kickstart -k \"gui/\$(id -u)/com.meetingnotes.llamaserver\""
-  echo "    Your recording was NOT deleted — retry anytime with:"
-  echo "      meeting -f \"$AUDIO\""
+  if [ -z "$INPUT_FILE" ]; then
+    echo "    Your recordings were NOT deleted — retry anytime with:"
+    echo "      meeting -f \"$MIC_AUDIO\"   (mic only, no speaker labels)"
+  fi
   exit 1
 fi
 
@@ -403,7 +502,7 @@ APPLESCRIPT
 fi
 
 if [ -z "$INPUT_FILE" ]; then
-  rm -f "$AUDIO"
+  rm -f "$MIC_AUDIO" "$SYS_AUDIO"
 fi
 echo "✅  Saved to:  $OUT_DIR"
 open "$OUT_DIR"
@@ -412,7 +511,7 @@ chmod +x "$BREW_BIN/meeting"
 
 # Guide the one-time audio device setup (can't be safely scripted)
 open -a "Audio MIDI Setup" 2>/dev/null || true
-osascript -e 'display dialog "One quick audio setup so the app can hear your meetings.\n\nIn Audio MIDI Setup (now open), click + at bottom-left and make TWO devices:\n\n1) Create Multi-Output Device — tick Speakers AND BlackHole 2ch. Rename it:  Meeting Output\n\n2) Create Aggregate Device — tick Microphone AND BlackHole 2ch. Rename it:  Meeting Capture\n\n(No BlackHole listed? Restart your Mac once.)" buttons {"Done"} default button 1 with title "Meeting Notes"' >/dev/null 2>&1 || true
+osascript -e 'display dialog "One quick audio setup so the app can hear your meetings.\n\nIn Audio MIDI Setup (now open), click + at bottom-left:\n\nCreate Multi-Output Device — tick Speakers AND BlackHole 2ch. Rename it:  Meeting Output\n\nThat'"'"'s it — your Microphone and BlackHole 2ch are used directly, no Aggregate Device needed.\n\n(No BlackHole listed? Restart your Mac once.)" buttons {"Done"} default button 1 with title "Meeting Notes"' >/dev/null 2>&1 || true
 
 echo ""
 echo "============================================================"

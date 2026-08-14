@@ -25,13 +25,15 @@ Launch moved to Tuesday; the billing fix must land Friday.
 
 ## Action Items
 - [ ] Ship the billing fix — Priya (Friday)
-- [ ] Draft the press release — unassigned
+- [ ] Draft the press release — You
 
 ## Open Questions
 - Who owns the press release?
 ```
 
 Notes appear in **Desktop ▸ Meeting Notes** and are emailed to you automatically.
+
+**Speaker-aware action items:** your mic and the far side (everyone else on the call) are recorded as two separate streams, so the transcript knows who said what — labeled `You:` / `Them:` by timestamp. When someone commits to a task without stating a name, it's assigned to `You` or `Them` correctly instead of `unassigned`. If a name *is* mentioned in the conversation (like "Priya" above), that takes priority over the tag.
 
 ---
 
@@ -77,7 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/kvango/Meeting-Summarizer/main/inst
 5. Downloads the speech model (~800 MB) and the default LLM GGUF (~4 GB for Gemma 4 E4B at `Q8_0`)
 6. Creates folders for notes and a support directory
 7. Asks for your email (for automatic note delivery)
-8. Walks you through a two-click audio setup (macOS asks for microphone permission)
+8. Walks you through a one-click audio setup (macOS asks for microphone permission) — creating a single Multi-Output Device so your Mac's speaker audio also reaches BlackHole. Your microphone and BlackHole are then recorded directly as two separate streams; no Aggregate Device needed.
 
 **The first run takes a few minutes.** After that, everything is cached locally, and re-running the installer (e.g. after a `git pull`) won't redownload or restart anything that's already in place.
 
@@ -114,13 +116,17 @@ Supported `-p/--provider` values: `llamacpp` (default) | `ollama` | `lmstudio` |
 
 ### Reprocess an existing recording:
 
-Skip recording entirely and re-run transcription + summarization on any `.m4a`/`.mp3`/`.wav` you already have — a failed run, a call recorded elsewhere, or anything you want to summarize with a different model:
+Every normal `meeting` call records two files — `rec_<timestamp>_mic.wav` (you) and `rec_<timestamp>_system.wav` (the far side) — both kept in `~/Library/Application Support/MeetingNotes/` if a run ever fails partway through, so nothing is lost.
+
+Skip recording and re-run transcription + summarization on any single `.m4a`/`.mp3`/`.wav` you already have — a call recorded elsewhere, or anything you want to re-summarize with a different model:
 
 ```bash
-meeting -f "~/Library/Application Support/MeetingNotes/rec_2026-08-10_12-59.m4a"
+meeting -f "~/Library/Application Support/MeetingNotes/rec_2026-08-10_12-59_mic.wav"
 ```
 
-If a run ever fails partway through, the recording is **never deleted** — the error message tells you the exact `meeting -f ...` command to retry it.
+Note that `-f` takes **one** file, so it always runs in legacy single-stream mode — no `You:`/`Them:` speaker labels, since there's no second stream to compare timestamps against. It's meant for recovery and for summarizing recordings that were never split into mic/system in the first place.
+
+If a run ever fails partway through, the recordings are **never deleted** — the error message tells you the exact `meeting -f ...` command to retry with (using the mic-only file, since that alone is enough to produce notes without speaker labels).
 
 ### List available models:
 
@@ -140,7 +146,12 @@ meeting --help
 
 Two different config files control two different things — worth knowing the difference:
 
-- **`~/Library/Application Support/MeetingNotes/config.sh`** — per-run settings read every time you type `meeting`: `LLM`, `BASE_URL`, `API_KEY`. Edit this to change your default model or endpoint.
+- **`~/Library/Application Support/MeetingNotes/config.sh`** — per-run settings read every time you type `meeting`:
+  - `LLM`, `BASE_URL`, `API_KEY` — your default model and endpoint.
+  - `MIC_DEVICE` — your microphone's exact AVFoundation device name. Defaults to `Microphone`; if that doesn't match your Mac (e.g. a named USB mic), run `ffmpeg -f avfoundation -list_devices true -i ""` to find the real name.
+  - `MIC_FALLBACK_DEVICE` — used automatically if `MIC_DEVICE` isn't connected (e.g. you configured a USB mic but are traveling without it). Defaults to `MacBook Pro Microphone`. Your primary `MIC_DEVICE` setting is never overwritten — it just falls back for that one recording.
+  - `SYSTEM_DEVICE` — the far-side/loopback device, normally `BlackHole 2ch`.
+  - `OUTPUT_DEVICE` — the Multi-Output Device created during setup, normally `Meeting Output`.
 - **Near the top of `install.sh`** — one-time settings baked into the `llama-server` background service when it's (re)installed: `MODEL_REPO`, `MODEL_QUANT`, and `MODEL_CTX`.
   - `MODEL_QUANT` controls how compressed the model weights are (size/speed/quality trade-off) — it has nothing to do with how much text you can send the model.
   - `MODEL_CTX` is the context window — the max combined tokens (prompt + transcript + response) the server will accept in one request. Long meetings can exceed this; if you see an `exceeds the available context size` error, raise `MODEL_CTX` (Gemma 4 E4B supports up to 131072) and re-run `install.sh` — it'll detect the change and restart the service automatically.
@@ -149,34 +160,46 @@ Two different config files control two different things — worth knowing the di
 
 ## How It Works (No Magic, Just Code)
 
-The entire pipeline is three steps:
+The entire pipeline is five steps:
 
-### Step 1: Capture Your Audio
+### Step 1: Capture Your Audio, As Two Streams
 
-A single `ffmpeg` line captures everything your Mac hears — both the call and your voice — into a compressed 16 kHz mono file:
+One `ffmpeg` process opens your microphone and BlackHole (system/loopback audio) as two independent inputs at once, so they share a clock and stay in sync — no Aggregate Device required:
 
 ```bash
-ffmpeg -f avfoundation -i ":Meeting Capture" -ac 1 -ar 16000 meeting.m4a
+ffmpeg -f avfoundation -i ":Microphone" -f avfoundation -i ":BlackHole 2ch" \
+  -map 0:a:0 -ac 1 -ar 16000 -c:a pcm_s16le mic.wav \
+  -map 1:a:0 -ac 1 -ar 16000 -c:a pcm_s16le system.wav
 ```
 
-Nothing is sent anywhere. It's just written to your disk.
+Nothing is sent anywhere. Both files are just written to your disk. Keeping them separate — rather than mixing to one file — is what makes speaker labeling possible: whatever's in `mic.wav` is unambiguously you, and whatever's in `system.wav` is unambiguously the far side, no diarization or voice-matching needed.
 
 ### Step 2: Transcribe (On Your GPU)
 
-**Whisper** runs directly on your Apple Silicon GPU via MLX. A 9-minute call becomes text in ~7 seconds:
+**Whisper** runs directly on your Apple Silicon GPU via MLX, transcribing both files independently. A 9-minute call becomes text in ~7 seconds per stream:
 
 ```python
 import mlx_whisper
 
-result = mlx_whisper.transcribe(
-    "meeting.m4a",
+mic_result = mlx_whisper.transcribe(
+    "mic.wav",
     path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
     condition_on_previous_text=False,  # prevents Whisper from looping on silence
 )
-transcript = result["text"]
+system_result = mlx_whisper.transcribe("system.wav", path_or_hf_repo="mlx-community/whisper-large-v3-turbo")
 ```
 
-### Step 3: Summarize (With a Local LLM)
+### Step 3: Merge By Timestamp, Tagged By Speaker
+
+Each transcript comes back as timestamped segments. They're interleaved into one transcript ordered by `start` time, tagged `You:` for every mic segment and `Them:` for every system segment:
+
+```
+[00:12] You: Can we push the deadline to Friday?
+[00:15] Them: Yeah, Friday works on our end.
+[00:18] You: Great, I'll update the doc.
+```
+
+### Step 4: Summarize (With a Local LLM)
 
 The same OpenAI client everyone uses for ChatGPT — just pointed at `localhost`, at a **llama.cpp** server instead of a cloud API:
 
@@ -188,7 +211,9 @@ client = OpenAI(base_url="http://localhost:8080/v1", api_key="not-needed")
 resp = client.chat.completions.create(
     model="gemma4:e4b",
     messages=[
-        {"role": "system", "content": "Summarize into TL;DR, Decisions, Action Items. Don't invent."},
+        {"role": "system", "content": "Summarize into TL;DR, Decisions, Action Items. "
+                                       "Lines are tagged You:/Them: — use the tag to assign "
+                                       "ownership when no name is stated. Don't invent."},
         {"role": "user", "content": transcript},
     ],
 )
@@ -197,7 +222,7 @@ notes = resp.choices[0].message.content
 
 `llama-server` (from llama.cpp) exposes the same OpenAI-compatible `/v1` API as Ollama, LM Studio, and every other local runtime — so this code doesn't change no matter which one you point it at. The model runs on your machine. No internet. No API key. No bill.
 
-### Step 4: Save and Email
+### Step 5: Save and Email
 
 Notes are written to Markdown, and a few lines of AppleScript send them to your Mail app.
 
@@ -261,11 +286,19 @@ tail -f "$HOME/Library/Application Support/MeetingNotes/llama-server.log"
 launchctl kickstart -k "gui/$(id -u)/com.meetingnotes.llamaserver"
 ```
 
-Your recording is never deleted on failure — retry with `meeting -f "<path to the .m4a>"` once the server's back up.
+Your recording is never deleted on failure — retry with `meeting -f "<path to the _mic.wav>"` once the server's back up.
+
+### "Audio device ... not found"
+
+Your `MIC_DEVICE` (or `SYSTEM_DEVICE`) in `config.sh` doesn't match a currently connected device — most often because a configured USB mic isn't plugged in. If a `MIC_FALLBACK_DEVICE` is set (defaults to `MacBook Pro Microphone`) and it's available, `meeting` automatically uses it for that recording and prints a heads-up — your `MIC_DEVICE` setting isn't changed, so plugging the USB mic back in works normally next time. If you see the error anyway, list your actual device names and update `config.sh` to match:
+
+```bash
+ffmpeg -f avfoundation -list_devices true -i ""
+```
 
 ### "exceeds the available context size" error
 
-Your transcript + prompt is longer than the server's configured context window. Raise `MODEL_CTX` near the top of `install.sh` (default `32768`; Gemma 4 E4B supports up to `131072`) and re-run `install.sh` — it detects the change and restarts the service with the new setting automatically. Then retry with `meeting -f "<path to the .m4a>"`.
+Your transcript + prompt is longer than the server's configured context window. Raise `MODEL_CTX` near the top of `install.sh` (default `32768`; Gemma 4 E4B supports up to `131072`) and re-run `install.sh` — it detects the change and restarts the service with the new setting automatically. Then retry with `meeting -f "<path to the _mic.wav>"`.
 
 ### Model download failed
 
@@ -352,7 +385,7 @@ Fork, break, improve. The only person who needs to approve your changes is you.
 ## FAQ
 
 **Q: Does this work with Zoom, Teams, Google Meet, FaceTime?**
-A: Yes. Your Mac plays the call through its speakers and hears it through its mic. This tool captures that audio at the OS level, so it works with any meeting app.
+A: Yes. Your Mac plays the call through its speakers (routed to BlackHole via the Multi-Output Device) and hears you through its mic. This tool captures both at the OS level as separate streams, so it works with any meeting app — and knows who said what, since your voice and the call audio never get mixed together.
 
 **Q: What if I want to use a bigger model for fancier summaries?**
 A: Run `meeting <model-name>` or swap the default in `config.sh`. Same one-word command.
@@ -361,7 +394,10 @@ A: Run `meeting <model-name>` or swap the default in `config.sh`. Same one-word 
 A: Install on each one independently. Each machine handles its own notes.
 
 **Q: What happens to notes if I close the app mid-call?**
-A: Press **q** to stop recording cleanly. If you force-quit, the audio file is saved but won't be transcribed until you run `meeting -f "<path to the .m4a>"`.
+A: Press **q** to stop recording cleanly. If you force-quit, the audio files are saved but won't be transcribed until you run `meeting -f "<path to the _mic.wav>"`.
+
+**Q: I use a USB mic but sometimes travel without it — what happens?**
+A: If your configured `MIC_DEVICE` isn't connected, `meeting` automatically falls back to `MIC_FALLBACK_DEVICE` (the built-in mic, by default) for that recording and tells you it did so. Your saved `MIC_DEVICE` setting is untouched, so things go back to normal once the USB mic is reconnected.
 
 **Q: Can I share notes with my team?**
 A: Your notes are Markdown files in `Desktop/Meeting Notes`. Email them, paste them, commit them — they're yours.
